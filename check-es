@@ -22,6 +22,7 @@ import sys
 import socket
 import ipaddress
 import argparse
+import base64
 
 try:
     import httplib
@@ -36,6 +37,9 @@ def init():
     parser.add_argument('-x', type=str, required=True, help="The status to check", choices=["status", "initializing_shards", "number_of_data_nodes", "number_of_nodes", "heap_used_percent"])
     parser.add_argument('-w', type=str, required=True, help="Warning value (dependent upon status)")
     parser.add_argument('-c', type=str, required=True, help="Critical value (dependent upon status)")
+    parser.add_argument('-U', type=str, required=False, help="Username")
+    parser.add_argument('-P', type=str, required=False, help="Password")
+    parser.add_argument('-s', action='store_true', required=False, help="SSL Connection", default=False)
     parser.add_argument('-C', type=str, required=False, help="Comparison type (ignored if -x is status)", choices=["<", "<=", ">", ">=", "!=", "=="], default="==")
     parser.add_argument('-a', type=str, required=False, help="Elasticsearch server to connect to (default localhost)", default="localhost")
     parser.add_argument('-p', type=int, required=False, help="Elasticsearch server HTTP port (default 9200)", default=9200)
@@ -48,22 +52,32 @@ def init():
     compare_val = args["C"]
     es_host = args["a"]
     es_port = args["p"]
+    es_user = args["U"]
+    es_pwd = args["P"]
+    ssl = args["s"]
 
-    return (status_check, warn_val, crit_val, compare_val, es_host, es_port)
+    return (status_check, warn_val, crit_val, compare_val, es_host, es_port , es_user , es_pwd , ssl )
 
 
-def init_data(host, port):
+def init_data(host, port,ssl,es_user,es_pwd):
     """Polls the host for initial stats"""
 
     try:
-        http_conn = httplib.HTTPConnection(host, port)
-
-        http_conn.request("GET", "/_cluster/health")
+        if ssl is True:
+            http_conn = httplib.HTTPSConnection(host, port)
+        else :
+            http_conn = httplib.HTTPConnection(host, port)     
+             
+        if es_user and es_pwd:                        
+            auth = base64.encodestring('%s:%s' % (es_user, es_pwd)).replace('\n', '')
+            headers = {'Authorization' : 'Basic %s' % auth}
+                        
+        http_conn.request("GET", "/_cluster/health", headers=headers)       
         health_data = json.loads(http_conn.getresponse().read())
-
-        http_conn.request("GET", "/_nodes/%s/stats/jvm" % "_local")
+        print health_data
+        http_conn.request("GET", "/_nodes/%s/stats/jvm" % "_local", headers=headers)
         node_data = json.loads(http_conn.getresponse().read())
-
+        print node_data
         http_conn.close()
 
         return (health_data, node_data)
@@ -188,9 +202,9 @@ def int_checker(value, status_check, comparison_op, crit_val, warn_val):
 
 
 def main():
-    status_check, warn_val, crit_val, compare_val, es_host, es_port = init()
+    status_check, warn_val, crit_val, compare_val, es_host, es_port , es_user , es_pwd , ssl = init()
 
-    data = init_data(es_host, es_port)
+    data = init_data(es_host, es_port , ssl , es_user , es_pwd)
 
     start(data, status_check, compare_val, crit_val, warn_val)
 
