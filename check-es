@@ -43,6 +43,7 @@ def init():
     parser.add_argument('-C', type=str, required=False, help="Comparison type (ignored if -x is status)", choices=["<", "<=", ">", ">=", "!=", "=="], default="==")
     parser.add_argument('-a', type=str, required=False, help="Elasticsearch server to connect to (default localhost)", default="localhost")
     parser.add_argument('-p', type=int, required=False, help="Elasticsearch server HTTP port (default 9200)", default=9200)
+    parser.add_argument('-d', action='store_true', required=False, help="Debug Mode", default=False)
 
     args = vars(parser.parse_args())
 
@@ -55,11 +56,12 @@ def init():
     es_user = args["U"]
     es_pwd = args["P"]
     ssl = args["s"]
+    debug = args["d"]
+    
+    return (status_check, warn_val, crit_val, compare_val, es_host, es_port , es_user , es_pwd , ssl , debug )
 
-    return (status_check, warn_val, crit_val, compare_val, es_host, es_port , es_user , es_pwd , ssl )
 
-
-def init_data(host, port,ssl,es_user,es_pwd):
+def init_data(host, port,ssl,es_user,es_pwd,debug ):
     """Polls the host for initial stats"""
 
     try:
@@ -74,10 +76,13 @@ def init_data(host, port,ssl,es_user,es_pwd):
                         
         http_conn.request("GET", "/_cluster/health", headers=headers)       
         health_data = json.loads(http_conn.getresponse().read())
-        print health_data
+        if debug is True:
+            print health_data
+        
         http_conn.request("GET", "/_nodes/%s/stats/jvm" % "_local", headers=headers)
         node_data = json.loads(http_conn.getresponse().read())
-        print node_data
+        if debug is True:
+            print node_data
         http_conn.close()
 
         return (health_data, node_data)
@@ -93,36 +98,40 @@ def start(data, status_check, comparison_op, crit_val, warn_val):
     node_data = data[1]
 
     if status_check == "status":
-        check_status(health_data["status"], status_check, crit_val, warn_val)
+        check_status(health_data["status"], status_check, crit_val, warn_val, health_data)
     elif status_check == "initializing_shards":
         int_checker(health_data["initializing_shards"],
                     status_check,
                     comparison_op,
                     crit_val,
-                    warn_val)
+                    warn_val,"initializing_shards")
     elif status_check == "number_of_data_nodes":
         int_checker(health_data["number_of_data_nodes"],
                     status_check,
                     comparison_op,
                     crit_val,
-                    warn_val)
+                    warn_val,"number_of_data_nodes")
     elif status_check == "number_of_nodes":
         int_checker(health_data["number_of_nodes"],
                     status_check,
                     comparison_op,
                     crit_val,
-                    warn_val)
+                    warn_val,"number_of_nodes")
     elif status_check == "heap_used_percent":
         # Verify data set just incase
         if len(node_data["nodes"]) > 0:
             node_id_key = node_data["nodes"].keys()[0]
-            int_checker(node_data["nodes"][node_id_key]["jvm"]["mem"]["heap_used_percent"])
+            int_checker(node_data["nodes"][node_id_key]["jvm"]["mem"]["heap_used_percent"],
+                    status_check,
+                    comparison_op,
+                    crit_val,
+                    warn_val,"heap_used_percent")
         else:
             print("CRITICAL: Unable to retrieve nodes list from %s. Is it down?" % "_local")
             sys.exit(2)
 
 
-def check_status(value, status_check, crit_val, warn_val):
+def check_status(value, status_check, crit_val, warn_val, health_data):
     """Basic check for status checking"""
 
     if value == warn_val:
@@ -132,79 +141,79 @@ def check_status(value, status_check, crit_val, warn_val):
         print("CRITICAL: %s has failed with %s." % (status_check, crit_val))
         sys.exit(2)
 
-    print("OK: %s is ok: %s" % (status_check, value))
+    print("OK: %s is ok: %s | NODE_READY=%s;%s;%s" % (status_check, value, health_data["number_of_nodes"], warn_val, crit_val))
     sys.exit(0)
 
 
-def int_checker(value, status_check, comparison_op, crit_val, warn_val):
+def int_checker(value, status_check, comparison_op, crit_val, warn_val,type_check):
     """Used for int based comparisons to do the check"""
 
     if comparison_op == "==":
         if value == int(crit_val):
-            print("CRITICAL: %s is == %s" % (status_check, crit_val))
+            print("CRITICAL: %s is == %s | %s=%s;%s;%s" % (status_check, crit_val, type_check, value, warn_val, crit_val))
             sys.exit(1)
         elif value == int(warn_val):
-            print("WARNING: %s is == %s" % (status_check, warn_val))
+            print("WARNING: %s is == %s | %s=%s;%s;%s" % (status_check, warn_val, type_check, value, warn_val, crit_val))
             sys.exit(2)
 
-        print("OK: %s is ok: %s" % (status_check, value))
+        print("OK: %s is ok: %s | %s=%s;%s;%s" % (status_check, value, type_check, value, warn_val, crit_val))
         sys.exit(0)
     elif comparison_op == "!=":
         if value != int(crit_val):
-            print("CRITICAL: %s is != %s" % (status_check, crit_val))
+            print("CRITICAL: %s is != %s | %s=%s;%s;%s" % (status_check, crit_val, type_check, value, warn_val, crit_val))
             sys.exit(1)
         elif value != int(warn_val):
-            print("WARNING: %s is != %s" % (status_check, warn_val))
+            print("WARNING: %s is != %s | %s=%s;%s;%s" % (status_check, warn_val, type_check, value, warn_val, crit_val))
             sys.exit(2)
 
-        print("OK: %s is ok: %s" % (status_check, value))
+        print("OK: %s is ok: %s | %s=%s;%s;%s" % (status_check, value, type_check, value, warn_val, crit_val))
         sys.exit(0)
     elif comparison_op == "<=":
         if value <= int(crit_val):
-            print("CRITICAL: %s is <= %s" % (status_check, crit_val))
+            print("CRITICAL: %s is <= %s | %s=%s;%s;%s" % (status_check, crit_val, type_check, value, warn_val, crit_val))
             sys.exit(1)
         elif value <= int(warn_val):
-            print("WARNING: %s is <= %s" % (status_check, warn_val))
+            print("WARNING: %s is <= %s | %s=%s;%s;%s" % (status_check, warn_val, type_check, value, warn_val, crit_val))
             sys.exit(2)
 
-        print("OK: %s is ok: %s" % (status_check, value))
+        print("OK: %s is ok: %s | %s=%s;%s;%s" % (status_check, value, type_check, value, warn_val, crit_val))
         sys.exit(0)
     elif comparison_op == "<":
         if value < int(crit_val):
-            print("CRITICAL: %s is < %s" % (status_check, crit_val))
+            print("CRITICAL: %s is < %s | %s=%s;%s;%s" % (status_check, crit_val, type_check, value, warn_val, crit_val))
             sys.exit(1)
         elif value < int(warn_val):
-            print("WARNING: %s is < %s" % (status_check, warn_val))
+            print("WARNING: %s is < %s | %s=%s;%s;%s" % (status_check, warn_val, type_check, value, warn_val, crit_val))
             sys.exit(2)
 
-        print("OK: %s is ok: %s" % (status_check, value))
+        print("OK: %s is ok: %s | %s=%s;%s;%s" % (status_check, value, type_check, value, warn_val, crit_val))
         sys.exit(0)
     elif comparison_op == ">":
         if value > int(crit_val):
-            print("CRITICAL: %s is > %s" % (status_check, crit_val))
+            print("CRITICAL: %s is > %s | %s=%s;%s;%s" % (status_check, crit_val, type_check, value, warn_val, crit_val))
             sys.exit(1)
         elif value > int(warn_val):
-            print("WARNING: %s is > %s" % (status_check, warn_val))
+            print("WARNING: %s is > %s | %s=%s;%s;%s" % (status_check, warn_val, type_check, value, warn_val, crit_val))
             sys.exit(2)
 
-        print("OK: %s is ok: %s" % (status_check, value))
+        print("OK: %s is ok: %s | %s=%s;%s;%s" % (status_check, value, type_check, value, warn_val, crit_val))
         sys.exit(0)
     elif comparison_op == ">=":
         if value >= int(crit_val):
-            print("CRITICAL: %s is >= %s" % (status_check, crit_val))
+            print("CRITICAL: %s is >= %s | %s=%s;%s;%s" % (status_check, crit_val, type_check, value, warn_val, crit_val))
             sys.exit(1)
         elif value >= int(warn_val):
-            print("WARNING: %s is >= %s" % (status_check, warn_val))
+            print("WARNING: %s is >= %s | %s=%s;%s;%s" % (status_check, warn_val, type_check, value, warn_val, crit_val))
             sys.exit(2)
 
-        print("OK: %s is ok: %s" % (status_check, value))
+        print("OK: %s is ok: %s | %s=%s;%s;%s" % (status_check, value, type_check, value, warn_val, crit_val))
         sys.exit(0)
 
 
 def main():
-    status_check, warn_val, crit_val, compare_val, es_host, es_port , es_user , es_pwd , ssl = init()
+    status_check, warn_val, crit_val, compare_val, es_host, es_port , es_user , es_pwd , ssl , debug = init()
 
-    data = init_data(es_host, es_port , ssl , es_user , es_pwd)
+    data = init_data(es_host, es_port , ssl , es_user , es_pwd, debug )
 
     start(data, status_check, compare_val, crit_val, warn_val)
 
