@@ -1,0 +1,259 @@
+#!/usr/bin/python
+#
+# check-ls status checker
+# Copyright (C) 2017 
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+import json
+import sys
+import socket
+import ipaddress
+import argparse
+import base64
+
+VERSION = '1.0'
+
+STATE_OK = 0
+STATE_WARNING = 1
+STATE_CRITICAL = 2
+STATE_UNKNOWN = 3
+STATE_TEXT = ['Ok', 'Warning', 'Critical', 'Unknown']
+STATE = STATE_OK
+OUTPUT_MESSAGE = ''
+OUTPUT_MESSAGE_PERFDATA = ''
+
+PARSER = argparse.ArgumentParser(description="Usage: check-ls -h <status> -w <warn> -c <crit> [options] ; -h, -w, -c are required")
+
+PARSER.add_argument('-x', '--check', type=str, required=True, help="The status to check", choices=["status", "percent_of_cpu_time"])
+PARSER.add_argument('-w', '--warning', type=str, required=True, help="Warning value (dependent upon status)")
+PARSER.add_argument('-c', '--critical', type=str, required=True, help="Critical value (dependent upon status)")
+PARSER.add_argument('-U', '--username' , type=str, required=False, help="Username")
+PARSER.add_argument('-P', '--password' , type=str, required=False, help="Password")
+PARSER.add_argument('-s', '--ssl' , action='store_true', required=False, help="SSL Connection", default=False)
+PARSER.add_argument('-C', '--comparaison', type=str, required=False, help="Comparison type (ignored if -x is status)", choices=["<", "<=", ">", ">=", "!=", "=="], default="==")
+PARSER.add_argument('-H', '--host', type=str, required=False, help="Logstash server to connect to (default localhost)", default="localhost")
+PARSER.add_argument('-p', '--port', type=int, required=False, help="Logstash server HTTP port (default 9200)", default=9200)
+PARSER.add_argument('-d', '--debug', action='store_true', required=False, help="Debug Mode", default=False)
+PARSER.add_argument('-v', '--version', action='store_true',help='Version 1.0.0')
+
+ARGS = PARSER.parse_args()
+
+
+try:
+    import httplib
+except ImportError as e:
+    import http.client as httplib
+
+    
+class Logstash(object):
+    
+    def __init__(self,                 
+                 host='127.0.0.1',
+                 port=9600,       
+                 username=None,
+                 password=None,
+                 warning=None,
+                 critical=None,
+                 check=None,
+                 comparaison=None,
+                 ssl=False,
+                 debug=False):          
+        
+        self.os_STATE = 0
+        self.os_OUTPUT_MESSAGE = ''
+        self.os_OUTPUT_MESSAGE_PERFDATA = ''
+        self.ssl = ssl
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.debug = debug
+        self.warning = warning
+        self.critical = critical
+        self.comparaison = comparaison
+        self.check = check                  
+    
+    
+    def init_data(self):
+        """Polls the host for initial stats"""
+    
+        try:
+            if self.ssl is True:
+                http_conn = httplib.HTTPSConnection(self.host, self.port)
+            else :
+                http_conn = httplib.HTTPConnection(self.host, self.port)     
+                
+            if self.username and self.password:                        
+                auth = base64.encodestring('%s:%s' % (self.username, self.password)).replace('\n', '')
+                headers = {'Authorization' : 'Basic %s' % auth}
+            else :
+                headers = {}
+                
+            http_conn.request("GET", "/_node/pipeline?pretty", headers=headers)       
+            health_data = json.loads(http_conn.getresponse().read())
+            if self.debug is True:
+                print health_data        
+                
+            http_conn.request("GET", "/_node/hot_threads?pretty", headers=headers)
+            node_data = json.loads(http_conn.getresponse().read())
+            if self.debug is True:
+                print node_data
+            http_conn.close()
+    
+            return (health_data, node_data)
+        except socket.error:
+            print("CRITICAL: %s is not responding." % self.host)
+            sys.exit(STATE_CRITICAL)
+    
+    
+    def start(self,data):
+        """Starts the check"""
+    
+        health_data = data[0]    
+        node_data = data[1]    
+    
+        if self.check == "status":
+            myos.check_status(health_data["pipeline"]["batch_delay"], health_data)
+        elif self.check == "percent_of_cpu_time":
+            # Verify data set just incase
+            if len(node_data["hot_threads"]) > 0:           
+                for element in node_data["hot_threads"]["threads"]:                    
+                    myos.int_checker(element["percent_of_cpu_time"],element["name"])                
+            else:
+               self.os_OUTPUT_MESSAGE += 'Unable to retrieve nodes list from %s. Is it down?' % ("_local")
+               self.os_STATE = 2
+    
+    
+    def check_status(self,delay,health_data):
+        """Basic check for status checking"""
+        self.os_OUTPUT_MESSAGE += ''
+        if delay >= int(self.critical):            
+            self.os_OUTPUT_MESSAGE += ' %s batch delay : %s(s)' % (health_data["host"], delay)            
+            self.os_STATE = 2
+        elif delay >= int(self.warning):
+            self.os_OUTPUT_MESSAGE += ' %s batch delay : %s(s)' % (health_data["host"], delay)             
+            self.os_STATE = 1
+        else:
+            self.os_OUTPUT_MESSAGE += ' %s is ok batch delay : %s(s)' % (health_data["host"], delay)
+            self.os_STATE = 0
+        
+        self.os_OUTPUT_MESSAGE_PERFDATA = 'DELAY_BATCH=%ss;%s;%s ' % (health_data["pipeline"]["batch_delay"], self.warning, self.critical)
+    
+    
+    def int_checker(self,value,name_threads):
+        """Used for int based comparisons to do the check"""
+        hot_threads = {}
+        if self.comparaison == "==":
+            if value == int(self.critical):
+                self.os_OUTPUT_MESSAGE += '%s is == %s ' % (name_threads, self.critical)                
+                self.os_STATE = 2
+            elif value == int(self.warning):
+                self.os_OUTPUT_MESSAGE += '%s is == %s ' % (name_threads, self.warning)               
+                self.os_STATE = 1
+            else:
+                self.os_OUTPUT_MESSAGE += '%s is ok: %s ' % (name_threads, value)
+                self.os_STATE = 0
+                
+        elif self.comparaison == "!=":
+            if value != int(self.critical):
+                self.os_OUTPUT_MESSAGE += '%s is != %s ' % (name_threads, self.critical)                
+                self.os_STATE = 2
+            elif value != int(self.warning):
+                self.os_OUTPUT_MESSAGE += '%s is != %s ' % (name_threads, self.warning)               
+                self.os_STATE = 1
+            else:               
+                self.os_OUTPUT_MESSAGE += '%s is ok: %s ' % (name_threads, value)
+                self.os_STATE = 0          
+            
+        elif self.comparaison == "<=":
+            if value <= int(self.critical):
+                self.os_OUTPUT_MESSAGE += '%s is <= %s ' % (name_threads, self.critical)                
+                self.os_STATE = 2
+            elif value <= int(self.warning):
+                self.os_OUTPUT_MESSAGE += '%s is <= %s ' % (name_threads, self.warning)               
+                self.os_STATE = 1
+            else:               
+                self.os_OUTPUT_MESSAGE += '%s is ok: %s ' % (name_threads, value)
+                self.os_STATE = 0
+                
+        elif self.comparaison == "<":
+            if value < int(self.critical):
+                self.os_OUTPUT_MESSAGE += '%s is < %s ' % (name_threads, self.critical)                
+                self.os_STATE = 2                
+            elif value < int(self.warning):
+                self.os_OUTPUT_MESSAGE += '%s is < %s ' % (name_threads, self.warning)               
+                self.os_STATE = 1
+            else:               
+                self.os_OUTPUT_MESSAGE += '%s is ok: %s ' % (name_threads, value)
+                self.os_STATE = 0
+                
+        elif self.comparaison == ">":
+            if value > int(self.critical):
+                self.os_OUTPUT_MESSAGE += '%s is > %s ' % (name_threads, self.critical)                
+                self.os_STATE = 2
+            elif value > int(self.warning):
+                self.os_OUTPUT_MESSAGE += '%s is > %s ' % (name_threads, self.warning)               
+                self.os_STATE = 1                
+            else:               
+                self.os_OUTPUT_MESSAGE += '%s is ok: %s ' % (name_threads, value)
+                self.os_STATE = 0
+        elif self.comparaison == ">=":
+            if value >= int(self.critical):
+                self.os_OUTPUT_MESSAGE += '%s is >= %s ' % (name_threads, self.critical)                
+                self.os_STATE = 2                
+            elif value >= int(self.warning):
+                self.os_OUTPUT_MESSAGE += '%s is >= %s ' % (name_threads, self.warning)               
+                self.os_STATE = 1
+            else:               
+                self.os_OUTPUT_MESSAGE += '%s is ok: %s ' % (name_threads, value)
+                self.os_STATE = 0
+                
+        self.os_OUTPUT_MESSAGE_PERFDATA += ' %s=%s;%s;%s ' % (name_threads, value, self.warning, self.critical)
+
+
+if __name__ == "__main__":
+    
+    if ARGS.version:
+        print "version: %s" % (VERSION)
+        sys.exit(0)
+    
+    myos = Logstash(host=ARGS.host,
+                    port=ARGS.port,
+                    username=ARGS.username,
+                    password=ARGS.password,
+                    warning=ARGS.warning,
+                    critical=ARGS.critical,
+                    check=ARGS.check,
+                    comparaison=ARGS.comparaison,
+                    ssl=ARGS.ssl,
+                    debug=ARGS.debug    
+                    )
+                    
+    #if ARGS.ssl:
+    #   self.ssl = False
+    #else:
+    #   self.ssl = True 
+    #data = init_data(ls_host, ls_port , ssl , ls_user , es_pwd, debug )
+    data = myos.init_data()
+    myos.start(data)
+    
+    try:
+        STATE = myos.os_STATE        
+        OUTPUT_MESSAGE = "%s | %s" % (myos.os_OUTPUT_MESSAGE, myos.os_OUTPUT_MESSAGE_PERFDATA)
+        print "%s:%s" % (STATE_TEXT[STATE], OUTPUT_MESSAGE)
+        sys.exit(STATE)
+    except ValueError:
+        print "Oops!  cant return STATE"
